@@ -32,4 +32,4 @@ def flag_large_transactions(
     transactions: list[dict], threshold: Decimal = FLAG_THRESHOLD
 ) -> list[dict]:
     """Retourne de NOUVELLES transactions avec un champ 'flag' (montant > seuil)."""
-    return [{**t, "flag": t["montant"] > threshold} for t in transactions]
+    return [{**t, "flag": t["montant"] >= threshold} for t in transactions]
