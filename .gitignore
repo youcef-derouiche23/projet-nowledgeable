@@ -1,0 +1,4 @@
+data/incoming/
+__pycache__/
+.venv/
+*.pyc
