@@ -134,64 +134,77 @@ docker compose stop s3 && S3_MAX_ATTEMPTS=3 S3_RETRY_DELAY=1 python -m src.pipel
 
 ### 1. Simulation d'un échec de pipeline (CI)
 
-Un bug est introduit volontairement dans le seuil de flag (`>=` au lieu de `>`, commit « Bug volontaire »). Les tests
-le détectent en local, la CI échoue sur l'étape « Lancer les tests » et **les étapes suivantes ne s'exécutent pas** :
-aucune donnée fausse n'atteint la base. Un second commit corrige le seuil et la CI repasse au vert.
+Un bug est introduit volontairement dans le seuil de flag (`>=` au lieu de `>`). Les tests le détectent en local, la CI
+échoue sur l'étape « Lancer les tests » et **les étapes suivantes ne s'exécutent pas** : aucune donnée fausse n'atteint la
+base. Un second commit corrige le seuil et la CI repasse au vert.
 
-**Les tests détectent le bug** : 3 tests en échec (`5000.00` est flaggé à tort, `6 == 5`).
-![Tests en échec](docs/screenshots/01_tests_en_echec.png)
+**Cause du problème** : le commit « Bug volontaire » remplace `>` par `>=` dans `flag_large_transactions`.
+![Cause du bug](docs/screenshots/01_cause_bug.png)
 
-**La CI échoue** (run #3) : « Lancer les tests » en rouge, étapes suivantes ignorées.
-![CI rouge](docs/screenshots/02_ci_rouge.png)
+**Message d'erreur** : 3 tests en échec (`5000.00` est flaggé à tort : `6 == 5`, `3 == 2`).
+![Tests en échec](docs/screenshots/02_tests_en_echec.png)
 
-**La CI est de nouveau verte après la correction** (run #4).
-![CI verte après correction](docs/screenshots/03_ci_verte_apres_correction.png)
+**Échec de la pipeline** (run #3) : « Lancer les tests » en rouge, étapes suivantes ignorées.
+![CI rouge](docs/screenshots/03_ci_rouge.png)
+
+**Correction apportée** : retour à `>` (seuil strictement supérieur à 5000).
+![Correction](docs/screenshots/04_correction.png)
+
+**Réussite après correction** (run #4).
+![CI verte après correction](docs/screenshots/05_ci_verte_apres_correction.png)
 
 **Historique** : succès, échec volontaire (#3), puis correction (#4).
-![Historique CI](docs/screenshots/04_historique_ci.png)
+![Historique CI](docs/screenshots/06_historique_ci.png)
 
 ### 2. Retry à l'insertion en base de données
 
 **Panne temporaire** (`SIMULATE_DB_FAILURES=2`) : deux échecs, attente croissante (1 s, 2 s), puis réussite.
-![Retry DB réussi](docs/screenshots/05_retry_db_reussi.png)
+![Retry DB réussi](docs/screenshots/07_retry_db_reussi.png)
 
 **Panne permanente** (`SIMULATE_DB_FAILURES=99`) : abandon après 3 tentatives, message clair, code de sortie 1.
-![Retry DB abandon](docs/screenshots/06_retry_db_abandon.png)
+![Retry DB abandon](docs/screenshots/08_retry_db_abandon.png)
 
 ### 3. Stockage S3 local
 
 **Upload et vérification** : 3/3 fichiers présents dans le bucket, traités ; une seconde exécution ignore les fichiers
 déjà traités (`[SKIP]`, anti-doublon).
-![Upload S3 et anti-doublon](docs/screenshots/07_upload_s3_et_anti_doublon.png)
+![Upload S3 et anti-doublon](docs/screenshots/09_upload_s3_et_anti_doublon.png)
 
 **Retry S3** (`SIMULATE_S3_FAILURES=2`) : deux échecs de récupération, puis réussite.
-![Retry S3](docs/screenshots/08_retry_s3_reussi.png)
+![Retry S3](docs/screenshots/10_retry_s3_reussi.png)
 
 **Vraie panne** (service S3 arrêté) : abandon propre après 3 tentatives, code de sortie 1, puis redémarrage du service.
-![Panne S3](docs/screenshots/09_panne_s3_abandon.png)
+![Panne S3](docs/screenshots/11_panne_s3_abandon.png)
 
 ### 4. OCR : images d'avis de virement
 
 **Exemple d'image** lue par l'OCR (`avis_virement_001.png`, montant 6200.00 EUR, donc flaggé).
-![Avis de virement](docs/screenshots/10_avis_virement.png)
+![Avis de virement](docs/screenshots/12_avis_virement.png)
 
 **Pipeline complète** : 6/6 fichiers envoyés puis traités (3 images via OCR, 3 CSV).
-![Pipeline CSV et images](docs/screenshots/11_pipeline_csv_et_images.png)
+![Pipeline CSV et images](docs/screenshots/13_pipeline_csv_et_images.png)
 
 **Suite de tests** : 40 tests passent.
-![40 tests](docs/screenshots/12_tests_40_passes.png)
+![40 tests](docs/screenshots/14_tests_40_passes.png)
 
 ### 5. CD et planificateur
 
-**Planificateur** en production : chaque cycle (toutes les 10 s) ignore les fichiers déjà traités, sans refaire d'OCR.
-![Planificateur](docs/screenshots/13_planificateur.png)
+**Environnement de production** : base de données, S3 et système de traitement tournent en conteneurs Docker.
+![Services de production](docs/screenshots/15_services_prod.png)
 
-**Workflow CD** : construction de l'image Docker publiée sur GHCR, puis déploiement de l'environnement de production.
-Déclenché automatiquement par la CI verte.
-![CD vert](docs/screenshots/14_cd_vert.png)
+**Planificateur** : les fichiers déposés sont traités au cycle suivant (`[OCR]` puis `[OK]`), puis ignorés aux cycles
+suivants (`[SKIP]`), sans refaire d'OCR.
+![Planificateur](docs/screenshots/16_planificateur.png)
+
+**Nouveau fichier** : `transactions_004.csv` est déposé dans le bucket ; seul ce fichier est traité, les autres sont ignorés.
+![Nouveau fichier](docs/screenshots/17_nouveau_fichier.png)
+
+**Workflow CD** : construction de l'image Docker publiée sur GHCR, puis déploiement de l'environnement de production,
+déclenché automatiquement par la CI verte.
+![CD vert](docs/screenshots/18_cd_vert.png)
 
 **CI verte sur le dernier commit** du dépôt.
-![CI verte sur le dernier commit](docs/screenshots/15_ci_verte_dernier_commit.png)
+![CI verte sur le dernier commit](docs/screenshots/19_ci_verte_dernier_commit.png)
 
 ## Limites connues
 
