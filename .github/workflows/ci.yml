@@ -27,6 +27,9 @@ jobs:
       - name: Démarrer PostgreSQL et le service S3 (SeaweedFS)
         run: docker compose up -d --wait
 
+      - name: Installer Tesseract (moteur OCR)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
       - name: Installer les dépendances
         run: pip install -r requirements.txt
 
@@ -36,7 +39,10 @@ jobs:
       - name: Générer les fichiers CSV
         run: python scripts/generate_csv.py
 
-      - name: Créer le bucket S3, envoyer les CSV et vérifier leur présence
+      - name: Générer les images d'avis de virement (pour l'OCR)
+        run: python -m scripts.generate_images
+
+      - name: Créer le bucket S3, envoyer les CSV et images, vérifier leur présence
         run: python -m scripts.upload_to_s3
 
       - name: Lancer la pipeline (S3 -> traitement -> base de données)

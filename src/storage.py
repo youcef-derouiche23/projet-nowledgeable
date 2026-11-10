@@ -1,4 +1,5 @@
 """Stockage S3 local (SeaweedFS) : bucket, upload, listing, téléchargement avec retry."""
+import mimetypes
 import os
 import time
 from pathlib import Path
@@ -108,29 +109,38 @@ def ensure_bucket(client, bucket: str) -> None:
 
 def upload_file(client, bucket: str, path: Path) -> str:
     path = Path(path)
-    client.put_object(Bucket=bucket, Key=path.name, Body=path.read_bytes(), ContentType="text/csv")
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    client.put_object(Bucket=bucket, Key=path.name, Body=path.read_bytes(), ContentType=content_type)
     return path.name
 
 
-def list_csv_keys(
+DATA_EXTENSIONS = (".csv", ".png", ".jpg", ".jpeg")
+
+
+def list_data_keys(
     client, bucket: str, *,
     max_attempts: int = DEFAULT_S3_MAX_ATTEMPTS,
     delay: float = DEFAULT_S3_RETRY_DELAY,
     sleep=time.sleep,
 ) -> list[str]:
+    """Liste les fichiers à traiter : CSV et images (OCR)."""
     def _list():
         paginator = client.get_paginator("list_objects_v2")
         return sorted(
             obj["Key"]
             for page in paginator.paginate(Bucket=bucket)
             for obj in page.get("Contents", [])
-            if obj["Key"].endswith(".csv")
+            if obj["Key"].lower().endswith(DATA_EXTENSIONS)
         )
     return _with_retry(_list, f"liste des fichiers du bucket {bucket}", max_attempts, delay, sleep)
 
 
+def list_csv_keys(client, bucket: str, **kwargs) -> list[str]:
+    return [k for k in list_data_keys(client, bucket, **kwargs) if k.lower().endswith(".csv")]
+
+
 def verify_files_present(client, bucket: str, expected_keys: list[str]) -> None:
-    present = set(list_csv_keys(client, bucket))
+    present = set(list_data_keys(client, bucket))
     missing = sorted(set(expected_keys) - present)
     if missing:
         raise MissingFilesError(f"Fichiers absents du bucket '{bucket}' : {missing}")

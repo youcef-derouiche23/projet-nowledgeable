@@ -20,6 +20,12 @@ def list_csv_files(directory: Path) -> list[Path]:
     return sorted(Path(directory).glob("*.csv"))
 
 
+def list_input_files(directory: Path) -> list[Path]:
+    """CSV et images d'avis de virement (OCR) présents dans un dossier."""
+    exts = (".csv", ".png", ".jpg", ".jpeg")
+    return sorted(p for p in Path(directory).iterdir() if p.suffix.lower() in exts)
+
+
 def compute_content_hash(data: bytes) -> str:
     """SHA-256 du contenu (sert à identifier un fichier déjà traité)."""
     return hashlib.sha256(data).hexdigest()

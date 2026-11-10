@@ -12,7 +12,7 @@ from src.processing import (
 from src.retry import retry
 from src.storage import (
     DEFAULT_BUCKET, DEFAULT_S3_MAX_ATTEMPTS, DEFAULT_S3_RETRY_DELAY,
-    download_bytes, get_s3_client, list_csv_keys,
+    download_bytes, get_s3_client, list_data_keys,
 )
 
 DEFAULT_MAX_ATTEMPTS = int(os.environ.get("DB_MAX_ATTEMPTS", "3"))
@@ -38,11 +38,16 @@ def process_content(
 ) -> bool:
     """Charge, traite et insère un fichier CSV. Retourne False s'il avait déjà été traité."""
     file_hash = compute_content_hash(data)
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise InvalidCsvError(f"{name}: encodage invalide ({exc})") from exc
-    transactions = parse_transactions(text, name)    # chargement
+    if name.lower().endswith((".png", ".jpg", ".jpeg")):
+        from src.ocr import image_to_csv             # image -> OCR -> CSV au format standard
+        text = image_to_csv(data, name)
+        print(f"[OCR]  {name} : informations extraites de l'image")
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InvalidCsvError(f"{name}: encodage invalide ({exc})") from exc
+    transactions = parse_transactions(text, name)    # chargement / validation (même flux que les CSV)
     flagged = flag_large_transactions(transactions)  # traitements (fonctions pures)
     results = (sum_sent_by_iban(flagged), sum_sent_by_bank(flagged), sum_received_by_iban(flagged))
 
@@ -83,9 +88,9 @@ def run_pipeline(
     client = client or get_s3_client()
     bucket = bucket or DEFAULT_BUCKET
 
-    keys = list_csv_keys(client, bucket, max_attempts=s3_max_attempts, delay=s3_retry_delay)
+    keys = list_data_keys(client, bucket, max_attempts=s3_max_attempts, delay=s3_retry_delay)
     if not keys:
-        raise FileNotFoundError(f"Aucun fichier CSV trouvé dans le bucket S3 '{bucket}'")
+        raise FileNotFoundError(f"Aucun fichier (CSV ou image) trouvé dans le bucket S3 '{bucket}'")
 
     processed = 0
     for key in keys:

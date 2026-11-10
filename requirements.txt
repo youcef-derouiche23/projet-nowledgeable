@@ -1,3 +1,5 @@
 pytest
 psycopg[binary]
 boto3
+pytesseract
+pillow

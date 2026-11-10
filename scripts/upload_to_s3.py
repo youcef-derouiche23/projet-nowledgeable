@@ -1,4 +1,4 @@
-"""Envoie les CSV générés dans le bucket S3 (le crée si besoin), puis vérifie leur présence.
+"""Envoie les CSV et images générés dans le bucket S3 (le crée si besoin), puis vérifie leur présence.
 
 Usage : python -m scripts.upload_to_s3 [--input-dir data/incoming]
 """
@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from src.loader import list_csv_files
+from src.loader import list_input_files
 from src.storage import (
     DEFAULT_BUCKET, ensure_bucket, get_s3_client, upload_file, verify_files_present, wait_for_s3,
 )
@@ -17,9 +17,9 @@ def main() -> int:
     parser.add_argument("--input-dir", default="data/incoming")
     args = parser.parse_args()
 
-    files = list_csv_files(Path(args.input_dir))
+    files = list_input_files(Path(args.input_dir))
     if not files:
-        print(f"[ERREUR] Aucun CSV dans {args.input_dir} : lancer d'abord scripts/generate_csv.py",
+        print(f"[ERREUR] Aucun fichier dans {args.input_dir} : lancer d'abord scripts/generate_csv.py",
               file=sys.stderr)
         return 1
 
