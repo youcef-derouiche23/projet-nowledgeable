@@ -1,0 +1,102 @@
+name: CD
+
+# Se déclenche automatiquement quand la CI est VERTE sur main (ou à la main via "Run workflow")
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: Construire et publier l'image Docker
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Récupérer le code validé par la CI
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Nom de l'image (en minuscules, exigé par GHCR)
+        id: meta
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}-processor:${SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Se connecter à GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construire et publier l'image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+
+  deploy:
+    name: Déployer l'environnement de production
+    needs: build-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      PROCESSOR_IMAGE: ${{ needs.build-image.outputs.image }}
+      SCHEDULER_INTERVAL: "10"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Se connecter à GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Déployer (base de données + S3 + système de traitement)
+        run: |
+          docker compose -f docker-compose.prod.yml pull processor
+          docker compose -f docker-compose.prod.yml up -d --wait
+          docker compose -f docker-compose.prod.yml ps
+
+      - name: Déposer des fichiers dans le S3 de production
+        run: |
+          docker compose -f docker-compose.prod.yml exec -T processor python scripts/generate_csv.py --output-dir /tmp/incoming
+          docker compose -f docker-compose.prod.yml exec -T processor python -m scripts.upload_to_s3 --input-dir /tmp/incoming
+
+      - name: Vérifier que le traitement planifié a traité les fichiers
+        run: |
+          for i in $(seq 1 40); do
+            n=$(docker compose -f docker-compose.prod.yml exec -T db psql -U pipeline -tAc "SELECT count(*) FROM processed_files" 2>/dev/null || echo 0)
+            echo "tentative $i : $n fichier(s) traité(s)"
+            [ "$n" = "3" ] && break
+            sleep 3
+          done
+          tx=$(docker compose -f docker-compose.prod.yml exec -T db psql -U pipeline -tAc "SELECT count(*) FROM transactions")
+          flagged=$(docker compose -f docker-compose.prod.yml exec -T db psql -U pipeline -tAc "SELECT count(*) FROM transactions WHERE flag")
+          echo "transactions=$tx flaggées=$flagged"
+          [ "$n" = "3" ] && [ "$tx" = "16" ] && [ "$flagged" = "5" ]
+
+      - name: Logs du planificateur
+        if: always()
+        run: docker compose -f docker-compose.prod.yml logs processor
+
+      - name: Arrêter l'environnement
+        if: always()
+        run: docker compose -f docker-compose.prod.yml down -v

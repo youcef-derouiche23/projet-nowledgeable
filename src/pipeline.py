@@ -38,6 +38,18 @@ def process_content(
 ) -> bool:
     """Charge, traite et insère un fichier CSV. Retourne False s'il avait déjà été traité."""
     file_hash = compute_content_hash(data)
+
+    def already_processed() -> bool:
+        with get_connection() as conn:
+            init_schema(conn)
+            return is_file_processed(conn, file_hash)
+
+    # Vérification AVANT l'OCR : inutile de relire une image déjà traitée à chaque cycle
+    if retry(already_processed, max_attempts=max_attempts, delay=retry_delay,
+             retry_on=(psycopg.OperationalError,), label=f"vérification de {name}"):
+        print(f"[SKIP] {name} : déjà traité")
+        return False
+
     if name.lower().endswith((".png", ".jpg", ".jpeg")):
         from src.ocr import image_to_csv             # image -> OCR -> CSV au format standard
         text = image_to_csv(data, name)

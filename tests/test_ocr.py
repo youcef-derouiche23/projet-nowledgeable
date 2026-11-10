@@ -103,3 +103,18 @@ def test_unreadable_image_stops_pipeline_with_clear_error(db, s3):
 
     with pytest.raises(OcrError, match="champs introuvables"):
         run_pipeline(s3.client, s3.bucket, retry_delay=0, s3_retry_delay=0)
+
+
+@requires_tesseract
+def test_processed_images_are_not_ocr_again(db, uploaded_csv, tmp_path, monkeypatch):
+    for path in generate_images.generate(tmp_path):
+        storage.upload_file(uploaded_csv.client, uploaded_csv.bucket, path)
+    run_pipeline(uploaded_csv.client, uploaded_csv.bucket, retry_delay=0, s3_retry_delay=0)
+
+    import src.ocr
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("l'OCR ne doit pas être relancé sur une image déjà traitée")
+
+    monkeypatch.setattr(src.ocr, "image_to_csv", forbidden)
+    assert run_pipeline(uploaded_csv.client, uploaded_csv.bucket, retry_delay=0, s3_retry_delay=0) == 0
