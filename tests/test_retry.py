@@ -1,17 +1,13 @@
-"""Tests du mécanisme de retry et de l'anti-doublon."""
-import os
-import shutil
-
+"""Tests du retry à l'insertion en base et de l'anti-doublon."""
 import psycopg
 import pytest
 
 import src.pipeline as pipeline
-from scripts.generate_csv import generate
-from src.database import DEFAULT_DATABASE_URL
+from src import storage
 from src.retry import RetryError, retry
 
 
-# ---------- Tests unitaires du retry (sans base de données) ----------
+# ---------- Tests unitaires du retry (sans service externe) ----------
 
 def test_retry_succeeds_after_transient_failures():
     calls, sleeps = {"n": 0}, []
@@ -55,31 +51,18 @@ def test_retry_does_not_retry_other_errors():
     assert calls["n"] == 1           # une erreur de données n'est jamais réessayée
 
 
-# ---------- Tests avec la vraie base : retry + pas de doublons ----------
-
-@pytest.fixture
-def db():
-    url = os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
-    try:
-        conn = psycopg.connect(url, autocommit=True)
-    except psycopg.OperationalError as exc:
-        if os.environ.get("CI"):
-            raise
-        pytest.skip(f"Base de données indisponible : {exc}")
-    conn.execute(
-        "DROP TABLE IF EXISTS received_by_iban, sent_by_bank, sent_by_iban, "
-        "transactions, processed_files CASCADE"
-    )
-    yield conn
-    conn.close()
-
+# ---------- Tests avec vraie base + vrai S3 : retry + pas de doublons ----------
 
 def _count(db, table):
     return db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def test_pipeline_recovers_from_temporary_failure(db, tmp_path, monkeypatch):
-    generate(tmp_path)
+def _run(env):
+    return pipeline.run_pipeline(env.client, env.bucket, max_attempts=3, retry_delay=0,
+                                 s3_max_attempts=3, s3_retry_delay=0)
+
+
+def test_pipeline_recovers_from_temporary_db_failure(db, uploaded_csv, monkeypatch):
     real_insert, state = pipeline.insert_processed_file, {"failures_left": 2}
 
     def flaky_insert(*args, **kwargs):
@@ -89,15 +72,14 @@ def test_pipeline_recovers_from_temporary_failure(db, tmp_path, monkeypatch):
         return real_insert(*args, **kwargs)
 
     monkeypatch.setattr(pipeline, "insert_processed_file", flaky_insert)
-    pipeline.run_pipeline(tmp_path, max_attempts=3, retry_delay=0)
+    _run(uploaded_csv)
 
     assert _count(db, "processed_files") == 3
     assert _count(db, "transactions") == 16      # aucune transaction en double
 
 
-def test_failure_after_insert_does_not_create_duplicates(db, tmp_path, monkeypatch):
+def test_failure_after_insert_does_not_create_duplicates(db, uploaded_csv, monkeypatch):
     """Panne APRÈS l'insertion mais avant la validation : tout est annulé, puis réessayé une fois."""
-    generate(tmp_path)
     real_insert, state = pipeline.insert_processed_file, {"failed": False}
 
     def insert_then_fail(*args, **kwargs):
@@ -108,33 +90,32 @@ def test_failure_after_insert_does_not_create_duplicates(db, tmp_path, monkeypat
         return result
 
     monkeypatch.setattr(pipeline, "insert_processed_file", insert_then_fail)
-    pipeline.run_pipeline(tmp_path, max_attempts=3, retry_delay=0)
+    _run(uploaded_csv)
 
     assert _count(db, "processed_files") == 3
     assert _count(db, "transactions") == 16
 
 
-def test_pipeline_stops_after_max_attempts(db, tmp_path, monkeypatch):
-    generate(tmp_path)
-
+def test_pipeline_stops_after_max_db_attempts(db, uploaded_csv, monkeypatch):
     def always_down(*args, **kwargs):
         raise psycopg.OperationalError("base indisponible")
 
     monkeypatch.setattr(pipeline, "insert_processed_file", always_down)
     with pytest.raises(RetryError):
-        pipeline.run_pipeline(tmp_path, max_attempts=3, retry_delay=0)
+        _run(uploaded_csv)
 
     assert _count(db, "processed_files") == 0    # rien n'a été enregistré
 
 
-def test_same_file_is_never_processed_twice(db, tmp_path):
-    generate(tmp_path)
-    assert pipeline.run_pipeline(tmp_path, retry_delay=0) == 3
-    assert pipeline.run_pipeline(tmp_path, retry_delay=0) == 0   # 2e lancement : tout ignoré
+def test_same_file_is_never_processed_twice(db, uploaded_csv):
+    assert _run(uploaded_csv) == 3
+    assert _run(uploaded_csv) == 0               # 2e lancement : tout est ignoré
 
-    # Même contenu sous un autre nom : reconnu grâce au hash, donc ignoré aussi
-    shutil.copy(tmp_path / "transactions_001.csv", tmp_path / "copie.csv")
-    assert pipeline.run_pipeline(tmp_path, retry_delay=0) == 0
+    # Même contenu sous un autre nom de fichier : reconnu grâce au hash, donc ignoré aussi
+    content = storage.download_bytes(uploaded_csv.client, uploaded_csv.bucket,
+                                     "transactions_001.csv")
+    uploaded_csv.client.put_object(Bucket=uploaded_csv.bucket, Key="copie.csv", Body=content)
+    assert _run(uploaded_csv) == 0
 
     assert _count(db, "processed_files") == 3
     assert _count(db, "transactions") == 16

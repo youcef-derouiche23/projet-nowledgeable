@@ -8,23 +8,12 @@ jobs:
   pipeline:
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: pipeline
-          POSTGRES_PASSWORD: pipeline
-          POSTGRES_DB: pipeline
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U pipeline"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     env:
       DATABASE_URL: postgresql://pipeline:pipeline@localhost:5432/pipeline
+      S3_ENDPOINT_URL: http://localhost:8333
+      S3_ACCESS_KEY: admin
+      S3_SECRET_KEY: secret
+      S3_BUCKET: transactions
 
     steps:
       - name: Récupérer le code
@@ -35,6 +24,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Démarrer PostgreSQL et le service S3 (SeaweedFS)
+        run: docker compose up -d --wait
+
       - name: Installer les dépendances
         run: pip install -r requirements.txt
 
@@ -44,5 +36,12 @@ jobs:
       - name: Générer les fichiers CSV
         run: python scripts/generate_csv.py
 
-      - name: Lancer la pipeline (base de données + traitement + insertion)
+      - name: Créer le bucket S3, envoyer les CSV et vérifier leur présence
+        run: python -m scripts.upload_to_s3
+
+      - name: Lancer la pipeline (S3 -> traitement -> base de données)
         run: python -m src.pipeline
+
+      - name: Logs des services (en cas d'échec)
+        if: failure()
+        run: docker compose logs

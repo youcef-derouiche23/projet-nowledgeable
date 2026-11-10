@@ -1,18 +1,20 @@
-"""Pipeline : chargement -> traitement -> insertion en base (avec retry), pour chaque CSV."""
+"""Pipeline : S3 -> récupération -> chargement -> traitement -> insertion en base (avec retry)."""
 import os
 import sys
-from pathlib import Path
 
 import psycopg
 
 from src.database import get_connection, init_schema, insert_processed_file, is_file_processed
-from src.loader import compute_file_hash, list_csv_files, load_transactions
+from src.loader import InvalidCsvError, compute_content_hash, parse_transactions
 from src.processing import (
     flag_large_transactions, sum_received_by_iban, sum_sent_by_bank, sum_sent_by_iban,
 )
 from src.retry import retry
+from src.storage import (
+    DEFAULT_BUCKET, DEFAULT_S3_MAX_ATTEMPTS, DEFAULT_S3_RETRY_DELAY,
+    download_bytes, get_s3_client, list_csv_keys,
+)
 
-DEFAULT_INPUT_DIR = Path("data/incoming")
 DEFAULT_MAX_ATTEMPTS = int(os.environ.get("DB_MAX_ATTEMPTS", "3"))
 DEFAULT_RETRY_DELAY = float(os.environ.get("DB_RETRY_DELAY", "2"))
 
@@ -28,14 +30,19 @@ def _simulate_failure_if_requested() -> None:
         raise psycopg.OperationalError("échec simulé : base temporairement indisponible")
 
 
-def process_file(
-    path: Path,
+def process_content(
+    name: str,
+    data: bytes,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay: float = DEFAULT_RETRY_DELAY,
 ) -> bool:
-    """Traite un fichier. Retourne False s'il avait déjà été traité (ignoré)."""
-    file_hash = compute_file_hash(path)
-    transactions = load_transactions(path)           # chargement (I/O)
+    """Charge, traite et insère un fichier CSV. Retourne False s'il avait déjà été traité."""
+    file_hash = compute_content_hash(data)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InvalidCsvError(f"{name}: encodage invalide ({exc})") from exc
+    transactions = parse_transactions(text, name)    # chargement
     flagged = flag_large_transactions(transactions)  # traitements (fonctions pures)
     results = (sum_sent_by_iban(flagged), sum_sent_by_bank(flagged), sum_received_by_iban(flagged))
 
@@ -46,7 +53,7 @@ def process_file(
             if is_file_processed(conn, file_hash):   # garde anti-doublon, y compris après un retry
                 return False
             _simulate_failure_if_requested()
-            insert_processed_file(conn, path.name, file_hash, flagged, *results)
+            insert_processed_file(conn, name, file_hash, flagged, *results)
             return True
 
     inserted = retry(
@@ -54,26 +61,38 @@ def process_file(
         max_attempts=max_attempts,
         delay=retry_delay,
         retry_on=(psycopg.OperationalError,),        # seulement les pannes temporaires
-        label=f"insertion de {path.name}",
+        label=f"insertion de {name}",
     )
     if inserted:
-        print(f"[OK]   {path.name} : {len(flagged)} transactions, "
+        print(f"[OK]   {name} : {len(flagged)} transactions, "
               f"{sum(t['flag'] for t in flagged)} flaggée(s)")
     else:
-        print(f"[SKIP] {path.name} : déjà traité")
+        print(f"[SKIP] {name} : déjà traité")
     return inserted
 
 
 def run_pipeline(
-    input_dir: Path = DEFAULT_INPUT_DIR,
+    client=None,
+    bucket: str | None = None,
+    *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay: float = DEFAULT_RETRY_DELAY,
+    s3_max_attempts: int = DEFAULT_S3_MAX_ATTEMPTS,
+    s3_retry_delay: float = DEFAULT_S3_RETRY_DELAY,
 ) -> int:
-    files = list_csv_files(input_dir)
-    if not files:
-        raise FileNotFoundError(f"Aucun fichier CSV trouvé dans {input_dir}")
-    processed = sum(process_file(f, max_attempts, retry_delay) for f in files)
-    print(f"Pipeline terminée : {processed}/{len(files)} fichier(s) traité(s)")
+    client = client or get_s3_client()
+    bucket = bucket or DEFAULT_BUCKET
+
+    keys = list_csv_keys(client, bucket, max_attempts=s3_max_attempts, delay=s3_retry_delay)
+    if not keys:
+        raise FileNotFoundError(f"Aucun fichier CSV trouvé dans le bucket S3 '{bucket}'")
+
+    processed = 0
+    for key in keys:
+        data = download_bytes(client, bucket, key,
+                              max_attempts=s3_max_attempts, delay=s3_retry_delay)
+        processed += process_content(key, data, max_attempts, retry_delay)
+    print(f"Pipeline terminée : {processed}/{len(keys)} fichier(s) traité(s)")
     return processed
 
 

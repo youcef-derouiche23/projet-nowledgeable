@@ -12,3 +12,14 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  # Service S3 local (SeaweedFS) : API compatible Amazon S3 sur le port 8333
+  s3:
+    image: chrislusf/seaweedfs:latest
+    command: mini -dir=/data
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: secret
+      S3_BUCKET: transactions
+    ports:
+      - "8333:8333"
