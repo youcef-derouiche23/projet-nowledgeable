@@ -116,6 +116,8 @@ pipeline. En cas d'échec, les logs des conteneurs sont affichés.
 2. déploie l'environnement de production (`docker-compose.prod.yml` : base de données, S3, planificateur) ;
 3. dépose des fichiers dans le S3 de production et vérifie que le traitement planifié les a traités
    (3 fichiers, 16 transactions, 5 flaggées).
+4. si la variable de dépôt `AZURE_VM_HOST` est définie, déploie le même environnement par SSH sur une machine
+   virtuelle Azure (job `deploy-vm`, voir [docs/DEPLOIEMENT_AZURE.md](docs/DEPLOIEMENT_AZURE.md)).
 
 ## Démonstrations de pannes
 
@@ -210,7 +212,8 @@ déclenché automatiquement par la CI verte.
 
 - Les identifiants (`admin` / `secret`, `pipeline` / `pipeline`) sont des valeurs de démonstration : en production réelle,
   ils viendraient de secrets.
-- Le CD déploie sur un runner GitHub (machine virtuelle éphémère) pour prouver le déploiement, pas sur un serveur
-  persistant.
+- Le déploiement sur une machine virtuelle persistante est écrit (job `deploy-vm`) mais n'a pas pu être exécuté :
+  sur l'abonnement Azure for Students utilisé, aucune taille de VM n'est à la fois proposée dans les régions autorisées
+  et couverte par un quota. En attendant, le CD prouve le déploiement sur un runner GitHub (machine virtuelle éphémère).
 - L'OCR attend un format d'avis de virement fixe (libellés « IBAN origine », « Montant », etc.). Les IBAN sont validés
   par leur format, pas par leur clé de contrôle.
