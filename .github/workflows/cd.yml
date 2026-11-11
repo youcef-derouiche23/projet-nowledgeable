@@ -47,7 +47,7 @@ jobs:
           tags: ${{ steps.meta.outputs.image }}
 
   deploy:
-    name: Déployer l'environnement de production
+    name: Tester le déploiement (environnement éphémère)
     needs: build-image
     runs-on: ubuntu-latest
     permissions:
@@ -100,3 +100,78 @@ jobs:
       - name: Arrêter l'environnement
         if: always()
         run: docker compose -f docker-compose.prod.yml down -v
+
+  # Déploiement sur la VM Azure (environnement de production persistant).
+  # Ne s'exécute que si la variable de dépôt AZURE_VM_HOST est définie.
+  deploy-vm:
+    name: Déployer sur la VM Azure
+    needs: [build-image, deploy]
+    if: ${{ vars.AZURE_VM_HOST != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      PROCESSOR_IMAGE: ${{ needs.build-image.outputs.image }}
+      VM_HOST: ${{ vars.AZURE_VM_HOST }}
+      VM_USER: ${{ vars.AZURE_VM_USER || 'azureuser' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Préparer la connexion SSH
+        env:
+          SSH_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_vm
+          chmod 600 ~/.ssh/id_vm
+          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts
+          echo "SSH=ssh -i $HOME/.ssh/id_vm -o BatchMode=yes $VM_USER@$VM_HOST" >> "$GITHUB_ENV"
+
+      - name: Envoyer la configuration sur la VM
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.PROD_POSTGRES_PASSWORD || 'pipeline' }}
+          S3_ACCESS_KEY: ${{ secrets.PROD_S3_ACCESS_KEY || 'admin' }}
+          S3_SECRET_KEY: ${{ secrets.PROD_S3_SECRET_KEY || 'secret' }}
+        run: |
+          umask 077
+          {
+            echo "PROCESSOR_IMAGE=$PROCESSOR_IMAGE"
+            echo "SCHEDULER_INTERVAL=60"
+            echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
+            echo "S3_ACCESS_KEY=$S3_ACCESS_KEY"
+            echo "S3_SECRET_KEY=$S3_SECRET_KEY"
+          } > prod.env
+          $SSH "mkdir -p ~/pipeline"
+          scp -i ~/.ssh/id_vm docker-compose.prod.yml "$VM_USER@$VM_HOST:pipeline/docker-compose.yml"
+          scp -i ~/.ssh/id_vm prod.env "$VM_USER@$VM_HOST:pipeline/.env"
+          rm prod.env
+
+      - name: Déployer (base de données + S3 + système de traitement)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | $SSH "docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+          $SSH "cd ~/pipeline && docker compose pull processor && docker compose up -d --no-build --wait && docker compose ps; s=\$?; docker logout ghcr.io; exit \$s"
+
+      - name: Déposer des fichiers dans le S3 de production
+        run: |
+          $SSH "cd ~/pipeline && docker compose exec -T processor python scripts/generate_csv.py --output-dir /tmp/incoming && docker compose exec -T processor python -m scripts.upload_to_s3 --input-dir /tmp/incoming"
+
+      - name: Vérifier que le traitement planifié a traité les fichiers
+        run: |
+          n=0
+          for i in $(seq 1 40); do
+            n=$($SSH "cd ~/pipeline && docker compose exec -T db psql -U pipeline -tAc 'SELECT count(*) FROM processed_files'" 2>/dev/null || echo 0)
+            echo "tentative $i : $n fichier(s) traité(s)"
+            [ "${n:-0}" -ge 3 ] && break
+            sleep 5
+          done
+          [ "${n:-0}" -ge 3 ]
+
+      - name: Logs du planificateur
+        if: always()
+        run: $SSH "cd ~/pipeline && docker compose logs --tail 40 processor" || true
