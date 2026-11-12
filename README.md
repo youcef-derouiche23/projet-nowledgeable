@@ -48,9 +48,9 @@ docker-compose.prod.yml      production : PostgreSQL + S3 + système de traiteme
 .github/workflows/cd.yml     CD : construction de l'image, déploiement, vérification
 ```
 
-## Lancer le projet et faire la démonstration, pas à pas
+## Lancer le projet 
 
-Ce guide est le déroulé exact de la démonstration. **Copiez uniquement le bloc de commandes** (le bloc gris, sans texte autour), collez-le dans le Terminal, puis lisez l'explication en dessous : elle suit l'ordre des lignes. Prérequis : Docker Desktop lancé, Python 3.13, Tesseract (`brew install tesseract` sur macOS), et les dépendances installées une fois avec `pip install -r requirements.txt` dans l'environnement virtuel (`python3 -m venv .venv`).
+Prérequis : Docker Desktop lancé, Python 3.13, Tesseract (`brew install tesseract` sur macOS), et les dépendances installées une fois avec `pip install -r requirements.txt` dans l'environnement virtuel (`python3 -m venv .venv`).
 
 ### Étape 1 : Préparer le Terminal
 
