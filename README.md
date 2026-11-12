@@ -48,34 +48,205 @@ docker-compose.prod.yml      production : PostgreSQL + S3 + système de traiteme
 .github/workflows/cd.yml     CD : construction de l'image, déploiement, vérification
 ```
 
-## Lancer le projet en local
+## Lancer le projet et faire la démonstration, pas à pas
 
-Prérequis : Docker Desktop, Python 3.13, et Tesseract pour l'OCR (`brew install tesseract` sur macOS).
+Ce guide est le déroulé exact de la démonstration. **Copiez uniquement la ligne de commande** (le bloc gris), exécutez-la, puis lisez l'explication en dessous. Prérequis : Docker Desktop lancé, Python 3.13, Tesseract (`brew install tesseract` sur macOS), et les dépendances installées une fois avec `pip install -r requirements.txt` dans l'environnement virtuel (`python3 -m venv .venv`).
+
+### Étape 1 : Préparer le Terminal
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-docker compose up -d --wait                  # PostgreSQL + S3 (SeaweedFS, port 8333)
-python -m pytest -v                          # 40 tests
-
-python scripts/generate_csv.py               # 3 CSV dans data/incoming
-python -m scripts.generate_images            # 3 images dans data/incoming
-python -m scripts.upload_to_s3               # bucket + upload + vérification
-python -m src.pipeline                       # traitement S3 -> base de données
+cd ~/projet-nowledgeable
 ```
 
-Relancer la pipeline n'a aucun effet sur les fichiers déjà traités (`[SKIP]`).
-
-### Environnement de production (local)
+Se placer dans le dossier du projet.
 
 ```bash
-docker compose down                          # libère le port 8333
+source .venv/bin/activate
+```
+
+Active l'environnement virtuel Python : les bibliothèques du projet (pytest, psycopg, boto3, pytesseract, pillow) deviennent utilisables. Le Terminal affiche `(.venv)` au début de la ligne.
+
+### Étape 2 : Repartir d'un environnement vide
+
+```bash
+docker compose -f docker-compose.prod.yml down -v
+```
+
+Arrête et supprime l'environnement de production s'il tourne, avec ses données. Libère le port 8333. Sans effet s'il n'est pas lancé.
+
+```bash
+docker compose down -v
+```
+
+Supprime l'environnement de développement précédent avec ses données : base et stockage S3 repartent vides.
+
+```bash
+docker compose up -d --wait
+```
+
+Démarre PostgreSQL et le stockage S3 (SeaweedFS) en arrière-plan, et attend qu'ils soient prêts. Doit afficher `Healthy` pour `db` et `s3`.
+
+```bash
+rm -f data/incoming/transactions_004.csv
+```
+
+Supprime un éventuel fichier de test laissé par une démonstration précédente, pour obtenir des chiffres exacts. Sans effet s'il n'existe pas.
+
+### Étape 3 : Lancer les tests automatiques
+
+```bash
+python -m pytest -q
+```
+
+Lance les 40 tests (traitements, base de données, intégration, retry, S3, OCR, planificateur) sur la vraie base et le vrai S3. **Résultat attendu :** `40 passed`. C'est ce que la CI exécute à chaque push.
+
+### Étape 4 : Générer les données
+
+```bash
+python scripts/generate_csv.py
+```
+
+Crée 3 fichiers CSV fixes dans `data/incoming/` (16 transactions, dont les cas pièges 5000.00 et 5000.01). **Résultat attendu :** 3 lignes `OK`.
+
+```bash
+python -m scripts.generate_images
+```
+
+Dessine 3 images d'avis de virement (6200.00, 5000.00, 480.50) pour l'OCR. **Résultat attendu :** 3 lignes `OK`.
+
+### Étape 5 : Envoyer les fichiers dans le stockage S3
+
+```bash
+python -m scripts.upload_to_s3
+```
+
+Crée le bucket `transactions`, y envoie les 6 fichiers, puis relit le bucket pour vérifier qu'ils y sont tous. **Résultat attendu :** 6 lignes `envoyé`, puis `vérification : 6/6 fichier(s) présent(s) dans le bucket`.
+
+### Étape 6 : Traiter les fichiers, avec une panne simulée de la base (retry)
+
+```bash
+SIMULATE_DB_FAILURES=2 DB_RETRY_DELAY=1 python -m src.pipeline
+```
+
+Lance la pipeline complète : téléchargement depuis S3, OCR des images, validation, calculs, insertion dans PostgreSQL. `SIMULATE_DB_FAILURES=2` fait échouer volontairement les 2 premières insertions, et `DB_RETRY_DELAY=1` règle la première attente à 1 s (puis 2 s, elle double). **Résultat attendu :** 2 lignes `[RETRY]` avec leur attente, puis `[OCR]` et `[OK]` pour chaque fichier, et `Pipeline terminée : 6/6 fichier(s) traité(s)`.
+
+### Étape 7 : Relancer la pipeline : l'anti-doublon
+
+```bash
+python -m src.pipeline
+```
+
+Relance la pipeline sans panne. Chaque fichier a une empreinte (hash SHA-256) déjà enregistrée en base : il est reconnu et ignoré. **Résultat attendu :** `[SKIP] ... déjà traité` pour les 6 fichiers, sans nouvel `[OCR]`, et `0/6 fichier(s) traité(s)`.
+
+### Étape 8 : Vérifier les données dans la base
+
+```bash
+docker compose exec db psql -U pipeline -c "SELECT count(*), count(*) FILTER (WHERE flag) FROM transactions;"
+```
+
+Interroge PostgreSQL : nombre total de transactions, puis nombre de celles dont le flag est vrai (montant strictement supérieur à 5000). **Résultat attendu :** `19 | 6` (16 transactions CSV dont 5 flaggées, plus 3 images dont 1 flaggée).
+
+### Étape 9 : Panne permanente de la base : abandon propre
+
+```bash
+docker compose down -v
+```
+
+Détruit la base et le S3 pour repartir de zéro.
+
+```bash
+docker compose up -d --wait
+```
+
+Les redémarre, vides.
+
+```bash
+python -m scripts.upload_to_s3
+```
+
+Renvoie les 6 fichiers (toujours présents sur le disque) dans le nouveau bucket.
+
+```bash
+SIMULATE_DB_FAILURES=99 DB_MAX_ATTEMPTS=3 DB_RETRY_DELAY=1 python -m src.pipeline; echo "code de sortie : $?"
+```
+
+Simule une panne qui ne finit jamais (`99`), avec 3 tentatives maximum. La pipeline s'arrête avec un message clair, et `echo` affiche le code de sortie. **Résultat attendu :** `tentative 1/3`, `2/3`, `3/3` échouées, puis `abandon après 3 tentatives` et `code de sortie : 1` (le code 1 signifie « terminé en erreur » : c'est ce qui fait échouer la CI).
+
+### Étape 10 : Panne temporaire du S3 : retry à la récupération
+
+```bash
+SIMULATE_S3_FAILURES=2 S3_RETRY_DELAY=1 python -m src.pipeline
+```
+
+Simule 2 échecs de téléchargement depuis le S3. La base est vide à ce stade (l'étape précédente n'a rien inséré), donc les fichiers sont traités. **Résultat attendu :** 2 lignes `[RETRY] récupération de ... depuis S3`, puis `[OK]` pour chaque fichier et `6/6 fichier(s) traité(s)`.
+
+### Étape 11 : Vraie panne du S3 : le service est arrêté
+
+```bash
+docker compose stop s3
+```
+
+Arrête réellement le conteneur du stockage S3.
+
+```bash
+S3_MAX_ATTEMPTS=3 S3_RETRY_DELAY=1 python -m src.pipeline; echo "code de sortie : $?"
+```
+
+La pipeline essaie de lister le bucket, échoue 3 fois, puis s'arrête proprement. **Résultat attendu :** 3 lignes `[RETRY] liste des fichiers du bucket transactions`, `abandon après 3 tentatives`, `code de sortie : 1`.
+
+```bash
+docker compose start s3
+```
+
+Redémarre le stockage S3.
+
+### Étape 12 (optionnelle, 2 minutes) : la production et le planificateur
+
+```bash
+docker compose down -v
+```
+
+Supprime l'environnement de développement pour libérer le port 8333.
+
+```bash
 SCHEDULER_INTERVAL=10 docker compose -f docker-compose.prod.yml up -d --build --wait
-docker compose -f docker-compose.prod.yml logs -f processor
 ```
 
-Tout fichier déposé dans le bucket (`python -m scripts.upload_to_s3`) est traité au cycle suivant.
+Construit l'image Docker du système de traitement, puis démarre 3 conteneurs : base de données, S3 et traitement. `SCHEDULER_INTERVAL=10` règle le planificateur sur un cycle toutes les 10 secondes (60 par défaut). Prend 1 à 2 minutes.
+
+```bash
+docker compose -f docker-compose.prod.yml ps
+```
+
+Liste les services de production. **Résultat attendu :** `db`, `s3` et `processor` démarrés.
+
+```bash
+python -m scripts.upload_to_s3
+```
+
+Dépose les 6 fichiers dans le S3 de production (port 8333).
+
+```bash
+sleep 25
+```
+
+Laisse au planificateur le temps d'effectuer plusieurs cycles.
+
+```bash
+docker compose -f docker-compose.prod.yml logs processor | grep -E "OCR|\[OK\]|SKIP|cycle"
+```
+
+Affiche le journal du planificateur. **Résultat attendu :** des cycles sans fichier, puis `[OCR]` et `[OK]` au cycle qui trouve les fichiers, puis uniquement des `[SKIP]` aux cycles suivants (aucun OCR refait).
+
+```bash
+docker compose -f docker-compose.prod.yml down -v
+```
+
+Arrête et supprime la production.
+
+### Étape 13 : les preuves sur GitHub
+
+Dans l'onglet **Actions** du dépôt : la CI n°3 rouge (bug volontaire `>=`) puis la n°4 verte (correction), et le workflow **CD** vert avec ses deux jobs (construction de l'image Docker, déploiement de l'environnement de production).
 
 ## Choix techniques
 
@@ -118,19 +289,6 @@ pipeline. En cas d'échec, les logs des conteneurs sont affichés.
    (3 fichiers, 16 transactions, 5 flaggées).
 4. si la variable de dépôt `AZURE_VM_HOST` est définie, déploie le même environnement par SSH sur une machine
    virtuelle Azure (job `deploy-vm`, voir [docs/DEPLOIEMENT_AZURE.md](docs/DEPLOIEMENT_AZURE.md)).
-
-## Démonstrations de pannes
-
-```bash
-# Panne temporaire de la base : 2 échecs, puis réussite
-SIMULATE_DB_FAILURES=2 DB_RETRY_DELAY=1 python -m src.pipeline
-# Panne permanente : abandon après 3 tentatives, code de sortie 1
-SIMULATE_DB_FAILURES=99 DB_MAX_ATTEMPTS=3 DB_RETRY_DELAY=1 python -m src.pipeline
-# Panne temporaire du S3
-SIMULATE_S3_FAILURES=2 S3_RETRY_DELAY=1 python -m src.pipeline
-# Vraie panne : service S3 arrêté
-docker compose stop s3 && S3_MAX_ATTEMPTS=3 S3_RETRY_DELAY=1 python -m src.pipeline; docker compose start s3
-```
 
 ## Captures d'écran
 
